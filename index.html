@@ -1025,30 +1025,34 @@ async function renderPageThumb(pdfDoc_or_bytes, pageNum, canvas, scale = 0.25) {
 //  TOOL ROUTER
 // ═══════════════════════════════════════════════════════
 function openTool(id) {
+  // Se referencian por NOMBRE (string) y se resuelven en window, de modo que
+  // si una herramienta no estuviera definida no se lanza un ReferenceError que
+  // rompería el router entero: simplemente se avisa de que no está disponible.
   const tools = {
-    merge:      toolMerge,
-    split:      toolSplit,
-    reorder:    toolReorder,
-    rotate:     toolRotate,
-    pdf2img:    toolPdf2Img,
-    img2pdf:    toolImg2Pdf,
-    compress:   toolCompress,
-    watermark:  toolWatermark,
-    numbers:    toolNumbers,
-    sign:       toolSign,
-    pdf2html:   toolPdf2Html,
-    pdf2word:   toolPdf2Word,
-    url2pdf:    toolUrl2Pdf,
-    cropmargins: toolCropMargins,
-    addmargins:  toolAddMargins,
-    cropselect:  toolCropSelect,
-    evenodd:     toolEvenOdd,
-    grayscale:   toolGrayscale,
-    resize:      toolResize,
-    addlink:     toolAddLink,
-    metadata:    toolMetadata,
+    merge:       'toolMerge',
+    split:       'toolSplit',
+    reorder:     'toolReorder',
+    rotate:      'toolRotate',
+    pdf2img:     'toolPdf2Img',
+    img2pdf:     'toolImg2Pdf',
+    compress:    'toolCompress',
+    watermark:   'toolWatermark',
+    numbers:     'toolNumbers',
+    sign:        'toolSign',
+    pdf2html:    'toolPdf2Html',
+    pdf2word:    'toolPdf2Word',
+    url2pdf:     'toolUrl2Pdf',
+    cropmargins: 'toolCropMargins',
+    addmargins:  'toolAddMargins',
+    cropselect:  'toolCropSelect',
+    evenodd:     'toolEvenOdd',
+    grayscale:   'toolGrayscale',
+    resize:      'toolResize',
+    addlink:     'toolAddLink',
+    metadata:    'toolMetadata',
   };
-  if (tools[id]) tools[id]();
+  const fn = tools[id] && window[tools[id]];
+  if (typeof fn === 'function') fn();
   else toast('Herramienta no disponible aún', 'error');
 }
 
@@ -3622,6 +3626,763 @@ async function decryptPDF(pdfBytes, password) {
 // pdf-lib no recomprime imágenes (limitación del browser).
 // Hacemos lo que SÍ podemos: eliminar metadatos, usar object streams,
 // y reportar honestamente si no hay reducción posible.
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: PÁGINAS PARES / IMPARES
+// ═══════════════════════════════════════════════════════
+function toolEvenOdd() {
+  openModal({
+    icon: '🔢', iconBg: 'var(--c-evenodd)', title: 'Páginas pares / impares', accentColor: 'var(--c-evenodd)',
+    subtitle: 'Extrae solo las páginas pares o solo las impares en un nuevo PDF.',
+    body: `
+      <div id="eoDrop" class="drop-zone" style="--accent-color:var(--c-evenodd)">
+        <span class="drop-icon">🔢</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-evenodd)">Seleccionar PDF</button>
+      </div>
+      <div id="eoOptions" style="display:none;flex-direction:column;gap:14px">
+        <div class="info-card tip"><span class="info-icon">📄</span><span id="eoInfo"></span></div>
+        <div class="form-group">
+          <label class="form-label">¿Qué páginas conservar?</label>
+          <div class="toggle-group" style="--accent-color:var(--c-evenodd)">
+            <button class="toggle-btn active" id="eoOdd" onclick="setEvenOdd('odd')">Impares (1, 3, 5…)</button>
+            <button class="toggle-btn" id="eoEven" onclick="setEvenOdd('even')">Pares (2, 4, 6…)</button>
+          </div>
+        </div>
+      </div>
+      <div id="eoResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="eoBtn" disabled onclick="runEvenOdd()" style="background:var(--c-evenodd)">🔢 Extraer y descargar</button>
+    `
+  });
+
+  window._eoMode = 'odd';
+  makeDropZone('eoDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._eoFile = file;
+    const buf = await readFile(file);
+    window._eoBuf = buf;
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    window._eoPageCount = src.getPageCount();
+    document.getElementById('eoDrop').style.display = 'none';
+    document.getElementById('eoOptions').style.display = 'flex';
+    document.getElementById('eoInfo').textContent = `"${file.name}" · ${src.getPageCount()} páginas`;
+    document.getElementById('eoBtn').disabled = false;
+  });
+}
+
+function setEvenOdd(mode) {
+  window._eoMode = mode;
+  document.getElementById('eoOdd').classList.toggle('active', mode === 'odd');
+  document.getElementById('eoEven').classList.toggle('active', mode === 'even');
+}
+
+async function runEvenOdd() {
+  const buf = window._eoBuf;
+  const mode = window._eoMode || 'odd';
+  const file = window._eoFile;
+  const btn = document.getElementById('eoBtn');
+  btn.disabled = true; btn.textContent = '⏳ Extrayendo...';
+  try {
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    const total = src.getPageCount();
+    // odd = páginas 1,3,5 (índices 0,2,4) ; even = 2,4,6 (índices 1,3,5)
+    const indices = [];
+    for (let i = 0; i < total; i++) {
+      const human = i + 1;
+      if (mode === 'odd' && human % 2 === 1) indices.push(i);
+      if (mode === 'even' && human % 2 === 0) indices.push(i);
+    }
+    if (!indices.length) { toast('No hay páginas que extraer', 'error'); btn.disabled = false; btn.textContent = '🔢 Extraer y descargar'; return; }
+    const out = await PDFLib.PDFDocument.create();
+    const pages = await out.copyPages(src, indices);
+    pages.forEach(p => out.addPage(p));
+    const bytes = await out.save();
+    const suffix = mode === 'odd' ? 'impares' : 'pares';
+    downloadBytes(bytes, file.name.replace('.pdf', '') + `_${suffix}.pdf`);
+    toast('✅ PDF generado', 'success');
+    document.getElementById('eoResult').innerHTML = `<div class="result-box"><span class="result-icon">✅</span><div class="result-title">¡Hecho!</div><div class="result-meta">${indices.length} páginas ${suffix}</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '🔢 Extraer y descargar';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: REDIMENSIONAR PÁGINAS
+// ═══════════════════════════════════════════════════════
+const PAGE_SIZES = {
+  a4:     { w: 595.28, h: 841.89, label: 'A4' },
+  letter: { w: 612,    h: 792,    label: 'Carta' },
+  legal:  { w: 612,    h: 1008,   label: 'Oficio' },
+  a3:     { w: 841.89, h: 1190.55, label: 'A3' },
+  a5:     { w: 419.53, h: 595.28, label: 'A5' },
+};
+
+function toolResize() {
+  const opts = Object.entries(PAGE_SIZES)
+    .map(([k, v]) => `<option value="${k}">${v.label} (${Math.round(v.w / 2.8346)}×${Math.round(v.h / 2.8346)} mm)</option>`)
+    .join('');
+  openModal({
+    icon: '📐', iconBg: 'var(--c-resize)', title: 'Redimensionar páginas', accentColor: 'var(--c-resize)',
+    subtitle: 'Ajusta todas las páginas a un tamaño estándar conservando la proporción del contenido.',
+    body: `
+      <div id="rsDrop" class="drop-zone" style="--accent-color:var(--c-resize)">
+        <span class="drop-icon">📐</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-resize)">Seleccionar PDF</button>
+      </div>
+      <div id="rsOptions" style="display:none;flex-direction:column;gap:14px">
+        <div class="info-card tip"><span class="info-icon">📄</span><span id="rsInfo"></span></div>
+        <div class="form-group">
+          <label class="form-label">Tamaño de destino</label>
+          <select class="form-input" id="rsSize">${opts}</select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Orientación</label>
+          <div class="toggle-group" style="--accent-color:var(--c-resize)">
+            <button class="toggle-btn active" id="rsAuto" onclick="setResizeOrient('auto')">Automática</button>
+            <button class="toggle-btn" id="rsPortrait" onclick="setResizeOrient('portrait')">Vertical</button>
+            <button class="toggle-btn" id="rsLandscape" onclick="setResizeOrient('landscape')">Horizontal</button>
+          </div>
+        </div>
+      </div>
+      <div id="rsResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="rsBtn" disabled onclick="runResize()" style="background:var(--c-resize)">📐 Redimensionar</button>
+    `
+  });
+
+  window._rsOrient = 'auto';
+  makeDropZone('rsDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._rsFile = file;
+    const buf = await readFile(file);
+    window._rsBuf = buf;
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    window._rsPageCount = src.getPageCount();
+    document.getElementById('rsDrop').style.display = 'none';
+    document.getElementById('rsOptions').style.display = 'flex';
+    document.getElementById('rsInfo').textContent = `"${file.name}" · ${src.getPageCount()} páginas`;
+    document.getElementById('rsBtn').disabled = false;
+  });
+}
+
+function setResizeOrient(o) {
+  window._rsOrient = o;
+  ['rsAuto', 'rsPortrait', 'rsLandscape'].forEach(id => {
+    const map = { rsAuto: 'auto', rsPortrait: 'portrait', rsLandscape: 'landscape' };
+    document.getElementById(id).classList.toggle('active', map[id] === o);
+  });
+}
+
+async function runResize() {
+  const buf = window._rsBuf;
+  const file = window._rsFile;
+  const sizeKey = document.getElementById('rsSize').value;
+  const orient = window._rsOrient || 'auto';
+  const base = PAGE_SIZES[sizeKey];
+  const btn = document.getElementById('rsBtn');
+  btn.disabled = true; btn.textContent = '⏳ Redimensionando...';
+  try {
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    const out = await PDFLib.PDFDocument.create();
+    const srcPages = src.getPages();
+    for (let i = 0; i < srcPages.length; i++) {
+      const sp = srcPages[i];
+      const { width: sw, height: sh } = sp.getSize();
+      const srcLandscape = sw > sh;
+      let tw = base.w, th = base.h;
+      if (orient === 'landscape' || (orient === 'auto' && srcLandscape)) { tw = base.h; th = base.w; }
+      const embedded = await out.embedPage(sp);
+      const newPage = out.addPage([tw, th]);
+      const scale = Math.min(tw / sw, th / sh);
+      const drawW = sw * scale, drawH = sh * scale;
+      newPage.drawPage(embedded, {
+        x: (tw - drawW) / 2,
+        y: (th - drawH) / 2,
+        width: drawW,
+        height: drawH,
+      });
+    }
+    const bytes = await out.save();
+    downloadBytes(bytes, file.name.replace('.pdf', '') + `_${base.label}.pdf`);
+    toast('✅ PDF redimensionado', 'success');
+    document.getElementById('rsResult').innerHTML = `<div class="result-box"><span class="result-icon">📐</span><div class="result-title">¡Redimensionado a ${base.label}!</div><div class="result-meta">${srcPages.length} páginas</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '📐 Redimensionar';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: AÑADIR MÁRGENES
+// ═══════════════════════════════════════════════════════
+const MM_TO_PT = 2.83465;
+
+function toolAddMargins() {
+  openModal({
+    icon: '⬜', iconBg: 'var(--c-addmargins)', title: 'Añadir márgenes', accentColor: 'var(--c-addmargins)',
+    subtitle: 'Añade un margen blanco alrededor del contenido sin cambiar el tamaño de página.',
+    body: `
+      <div id="amDrop" class="drop-zone" style="--accent-color:var(--c-addmargins)">
+        <span class="drop-icon">⬜</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-addmargins)">Seleccionar PDF</button>
+      </div>
+      <div id="amOptions" style="display:none;flex-direction:column;gap:14px">
+        <div class="info-card tip"><span class="info-icon">📄</span><span id="amInfo"></span></div>
+        <div class="form-group">
+          <label class="form-label">Margen (mm)</label>
+          <input class="form-input" id="amMm" type="number" min="1" max="100" value="15">
+        </div>
+      </div>
+      <div id="amResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="amBtn" disabled onclick="runAddMargins()" style="background:var(--c-addmargins)">⬜ Añadir márgenes</button>
+    `
+  });
+
+  makeDropZone('amDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._amFile = file;
+    const buf = await readFile(file);
+    window._amBuf = buf;
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    document.getElementById('amDrop').style.display = 'none';
+    document.getElementById('amOptions').style.display = 'flex';
+    document.getElementById('amInfo').textContent = `"${file.name}" · ${src.getPageCount()} páginas`;
+    document.getElementById('amBtn').disabled = false;
+  });
+}
+
+async function runAddMargins() {
+  const buf = window._amBuf;
+  const file = window._amFile;
+  const mm = parseFloat(document.getElementById('amMm').value) || 15;
+  const m = mm * MM_TO_PT;
+  const btn = document.getElementById('amBtn');
+  btn.disabled = true; btn.textContent = '⏳ Procesando...';
+  try {
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    const out = await PDFLib.PDFDocument.create();
+    const srcPages = src.getPages();
+    for (let i = 0; i < srcPages.length; i++) {
+      const sp = srcPages[i];
+      const { width: sw, height: sh } = sp.getSize();
+      const embedded = await out.embedPage(sp);
+      const newPage = out.addPage([sw, sh]);
+      const availW = sw - 2 * m, availH = sh - 2 * m;
+      const scale = Math.min(availW / sw, availH / sh);
+      const drawW = sw * scale, drawH = sh * scale;
+      newPage.drawPage(embedded, {
+        x: (sw - drawW) / 2,
+        y: (sh - drawH) / 2,
+        width: drawW,
+        height: drawH,
+      });
+    }
+    const bytes = await out.save();
+    downloadBytes(bytes, file.name.replace('.pdf', '') + '_margenes.pdf');
+    toast('✅ Márgenes añadidos', 'success');
+    document.getElementById('amResult').innerHTML = `<div class="result-box"><span class="result-icon">⬜</span><div class="result-title">¡Márgenes de ${mm} mm añadidos!</div><div class="result-meta">${srcPages.length} páginas</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '⬜ Añadir márgenes';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: RECORTAR MÁRGENES (uniforme en mm)
+// ═══════════════════════════════════════════════════════
+function toolCropMargins() {
+  openModal({
+    icon: '✂️', iconBg: 'var(--c-cropmargins)', title: 'Recortar márgenes', accentColor: 'var(--c-cropmargins)',
+    subtitle: 'Recorta un margen uniforme de todos los lados de cada página.',
+    body: `
+      <div id="cmDrop" class="drop-zone" style="--accent-color:var(--c-cropmargins)">
+        <span class="drop-icon">✂️</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-cropmargins)">Seleccionar PDF</button>
+      </div>
+      <div id="cmOptions" style="display:none;flex-direction:column;gap:14px">
+        <div class="info-card tip"><span class="info-icon">📄</span><span id="cmInfo"></span></div>
+        <div class="form-group">
+          <label class="form-label">Recortar de cada lado (mm)</label>
+          <input class="form-input" id="cmMm" type="number" min="1" max="100" value="10">
+        </div>
+      </div>
+      <div id="cmResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="cmBtn" disabled onclick="runCropMargins()" style="background:var(--c-cropmargins)">✂️ Recortar</button>
+    `
+  });
+
+  makeDropZone('cmDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._cmFile = file;
+    const buf = await readFile(file);
+    window._cmBuf = buf;
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    document.getElementById('cmDrop').style.display = 'none';
+    document.getElementById('cmOptions').style.display = 'flex';
+    document.getElementById('cmInfo').textContent = `"${file.name}" · ${src.getPageCount()} páginas`;
+    document.getElementById('cmBtn').disabled = false;
+  });
+}
+
+async function runCropMargins() {
+  const buf = window._cmBuf;
+  const file = window._cmFile;
+  const mm = parseFloat(document.getElementById('cmMm').value) || 10;
+  const m = mm * MM_TO_PT;
+  const btn = document.getElementById('cmBtn');
+  btn.disabled = true; btn.textContent = '⏳ Recortando...';
+  try {
+    const pdf = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    const pages = pdf.getPages();
+    for (const page of pages) {
+      const { width, height } = page.getSize();
+      const newW = width - 2 * m, newH = height - 2 * m;
+      if (newW <= 0 || newH <= 0) continue; // margen mayor que la página: la dejamos intacta
+      page.setCropBox(m, m, newW, newH);
+      page.setMediaBox(m, m, newW, newH);
+    }
+    const bytes = await pdf.save();
+    downloadBytes(bytes, file.name.replace('.pdf', '') + '_recortado.pdf');
+    toast('✅ Márgenes recortados', 'success');
+    document.getElementById('cmResult').innerHTML = `<div class="result-box"><span class="result-icon">✂️</span><div class="result-title">¡Recortado ${mm} mm por lado!</div><div class="result-meta">${pages.length} páginas</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '✂️ Recortar';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: RECORTAR ZONA SELECCIONADA
+// ═══════════════════════════════════════════════════════
+function toolCropSelect() {
+  openModal({
+    icon: '🔲', iconBg: 'var(--c-cropselect)', title: 'Recortar zona seleccionada', accentColor: 'var(--c-cropselect)',
+    subtitle: 'Dibuja un rectángulo sobre la primera página; el recorte se aplica a todas.',
+    body: `
+      <div id="csDrop" class="drop-zone" style="--accent-color:var(--c-cropselect)">
+        <span class="drop-icon">🔲</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-cropselect)">Seleccionar PDF</button>
+      </div>
+      <div id="csOptions" style="display:none;flex-direction:column;gap:14px;align-items:center">
+        <div class="info-card tip" style="align-self:stretch"><span class="info-icon">🖱️</span><span>Arrastra para seleccionar la zona a conservar.</span></div>
+        <div id="csCanvasWrap" style="position:relative;display:inline-block;line-height:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;cursor:crosshair">
+          <canvas id="csCanvas"></canvas>
+          <div id="csRect" style="position:absolute;border:2px dashed var(--c-cropselect);background:color-mix(in srgb,var(--c-cropselect) 15%,transparent);display:none;pointer-events:none"></div>
+        </div>
+      </div>
+      <div id="csResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="csBtn" disabled onclick="runCropSelect()" style="background:var(--c-cropselect)">🔲 Recortar zona</button>
+    `
+  });
+
+  window._csSel = null;
+  makeDropZone('csDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._csFile = file;
+    const buf = await readFile(file);
+    window._csBuf = buf;
+    document.getElementById('csDrop').style.display = 'none';
+    document.getElementById('csOptions').style.display = 'flex';
+    // Render página 1
+    const pdfjsDoc = await (await getPdfJs()).getDocument({ data: buf.slice(0) }).promise;
+    const page = await pdfjsDoc.getPage(1);
+    const maxW = 420;
+    const vp1 = page.getViewport({ scale: 1 });
+    const scale = Math.min(maxW / vp1.width, 1.5);
+    const vp = page.getViewport({ scale });
+    const canvas = document.getElementById('csCanvas');
+    canvas.width = vp.width; canvas.height = vp.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    window._csCanvasW = vp.width;
+    window._csCanvasH = vp.height;
+    setupCropSelect();
+  });
+}
+
+function setupCropSelect() {
+  const wrap = document.getElementById('csCanvasWrap');
+  const rect = document.getElementById('csRect');
+  let startX = 0, startY = 0, dragging = false;
+
+  const pos = e => {
+    const r = wrap.getBoundingClientRect();
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+    return {
+      x: Math.max(0, Math.min(cx, window._csCanvasW)),
+      y: Math.max(0, Math.min(cy, window._csCanvasH)),
+    };
+  };
+  const down = e => {
+    e.preventDefault();
+    dragging = true;
+    const p = pos(e); startX = p.x; startY = p.y;
+    rect.style.display = 'block';
+    rect.style.left = startX + 'px'; rect.style.top = startY + 'px';
+    rect.style.width = '0px'; rect.style.height = '0px';
+  };
+  const move = e => {
+    if (!dragging) return;
+    e.preventDefault();
+    const p = pos(e);
+    const x = Math.min(p.x, startX), y = Math.min(p.y, startY);
+    const w = Math.abs(p.x - startX), h = Math.abs(p.y - startY);
+    rect.style.left = x + 'px'; rect.style.top = y + 'px';
+    rect.style.width = w + 'px'; rect.style.height = h + 'px';
+  };
+  const up = e => {
+    if (!dragging) return;
+    dragging = false;
+    const x = parseFloat(rect.style.left), y = parseFloat(rect.style.top);
+    const w = parseFloat(rect.style.width), h = parseFloat(rect.style.height);
+    if (w < 8 || h < 8) { rect.style.display = 'none'; window._csSel = null; document.getElementById('csBtn').disabled = true; return; }
+    // Guardamos la selección como fracciones (origen arriba-izquierda)
+    window._csSel = {
+      fx: x / window._csCanvasW,
+      fy: y / window._csCanvasH,
+      fw: w / window._csCanvasW,
+      fh: h / window._csCanvasH,
+    };
+    document.getElementById('csBtn').disabled = false;
+  };
+
+  wrap.addEventListener('mousedown', down);
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+  wrap.addEventListener('touchstart', down, { passive: false });
+  wrap.addEventListener('touchmove', move, { passive: false });
+  wrap.addEventListener('touchend', up);
+}
+
+async function runCropSelect() {
+  const sel = window._csSel;
+  if (!sel) { toast('Selecciona una zona primero', 'error'); return; }
+  const buf = window._csBuf;
+  const file = window._csFile;
+  const btn = document.getElementById('csBtn');
+  btn.disabled = true; btn.textContent = '⏳ Recortando...';
+  try {
+    const pdf = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    const pages = pdf.getPages();
+    for (const page of pages) {
+      const { width, height } = page.getSize();
+      // El lienzo tiene origen arriba-izquierda; el PDF abajo-izquierda → invertimos Y
+      const cropX = sel.fx * width;
+      const cropW = sel.fw * width;
+      const cropH = sel.fh * height;
+      const cropY = height - (sel.fy * height) - cropH;
+      page.setCropBox(cropX, cropY, cropW, cropH);
+      page.setMediaBox(cropX, cropY, cropW, cropH);
+    }
+    const bytes = await pdf.save();
+    downloadBytes(bytes, file.name.replace('.pdf', '') + '_zona.pdf');
+    toast('✅ Zona recortada', 'success');
+    document.getElementById('csResult').innerHTML = `<div class="result-box"><span class="result-icon">🔲</span><div class="result-title">¡Zona recortada!</div><div class="result-meta">${pages.length} páginas</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '🔲 Recortar zona';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: ESCALA DE GRISES
+// ═══════════════════════════════════════════════════════
+// pdf-lib no puede recolorear contenido vectorial existente en el navegador,
+// así que rasterizamos cada página con pdf.js, aplicamos grayscale y la
+// reconstruimos como imagen (mismo enfoque que PDF→imágenes).
+function toolGrayscale() {
+  openModal({
+    icon: '🌑', iconBg: 'var(--c-grayscale)', title: 'Escala de grises', accentColor: 'var(--c-grayscale)',
+    subtitle: 'Convierte el PDF a blanco y negro. Cada página se rasteriza (el texto deja de ser seleccionable).',
+    body: `
+      <div id="gsDrop" class="drop-zone" style="--accent-color:var(--c-grayscale)">
+        <span class="drop-icon">🌑</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-grayscale)">Seleccionar PDF</button>
+      </div>
+      <div id="gsOptions" style="display:none;flex-direction:column;gap:14px">
+        <div class="info-card tip"><span class="info-icon">📄</span><span id="gsInfo"></span></div>
+        <div class="form-group">
+          <label class="form-label">Calidad</label>
+          <select class="form-input" id="gsQuality">
+            <option value="1.5">Estándar</option>
+            <option value="2" selected>Alta</option>
+            <option value="3">Muy alta (archivos grandes)</option>
+          </select>
+        </div>
+        <div id="gsProgress"></div>
+      </div>
+      <div id="gsResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="gsBtn" disabled onclick="runGrayscale()" style="background:var(--c-grayscale)">🌑 Convertir</button>
+    `
+  });
+
+  makeDropZone('gsDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._gsFile = file;
+    const buf = await readFile(file);
+    window._gsBuf = buf;
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    window._gsPageCount = src.getPageCount();
+    document.getElementById('gsDrop').style.display = 'none';
+    document.getElementById('gsOptions').style.display = 'flex';
+    document.getElementById('gsInfo').textContent = `"${file.name}" · ${src.getPageCount()} páginas`;
+    document.getElementById('gsBtn').disabled = false;
+  });
+}
+
+async function runGrayscale() {
+  const buf = window._gsBuf;
+  const file = window._gsFile;
+  const scale = parseFloat(document.getElementById('gsQuality').value) || 2;
+  const total = window._gsPageCount;
+  const btn = document.getElementById('gsBtn');
+  btn.disabled = true; btn.textContent = '⏳ Convirtiendo...';
+  document.getElementById('gsProgress').innerHTML = `<div class="progress-wrap"><div class="progress-bar-outer"><div class="progress-bar-inner" id="gsBar" style="width:0%;background:var(--c-grayscale)"></div></div><div class="progress-label" id="gsLabel">0 / ${total}</div></div>`;
+  try {
+    const pdfjsDoc = await (await getPdfJs()).getDocument({ data: buf.slice(0) }).promise;
+    const out = await PDFLib.PDFDocument.create();
+    for (let i = 1; i <= total; i++) {
+      const page = await pdfjsDoc.getPage(i);
+      const vp = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = vp.width; canvas.height = vp.height;
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      // Aplicar escala de grises a nivel de píxel (robusto en todos los navegadores)
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = img.data;
+      for (let p = 0; p < d.length; p += 4) {
+        const gray = (d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114) | 0;
+        d[p] = d[p + 1] = d[p + 2] = gray;
+      }
+      ctx.putImageData(img, 0, 0);
+      const jpg = canvas.toDataURL('image/jpeg', 0.9);
+      const jpgImg = await out.embedJpg(jpg);
+      // Tamaño en puntos según el viewport a escala 1
+      const vp1 = page.getViewport({ scale: 1 });
+      const newPage = out.addPage([vp1.width, vp1.height]);
+      newPage.drawImage(jpgImg, { x: 0, y: 0, width: vp1.width, height: vp1.height });
+      document.getElementById('gsBar').style.width = `${(i / total) * 100}%`;
+      document.getElementById('gsLabel').textContent = `${i} / ${total}`;
+      await new Promise(r => setTimeout(r, 30));
+    }
+    const bytes = await out.save();
+    downloadBytes(bytes, file.name.replace('.pdf', '') + '_grises.pdf');
+    toast('✅ PDF en escala de grises', 'success');
+    document.getElementById('gsResult').innerHTML = `<div class="result-box"><span class="result-icon">🌑</span><div class="result-title">¡Convertido a grises!</div><div class="result-meta">${total} páginas</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '🌑 Convertir';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: AÑADIR ENLACE (URL clicable)
+// ═══════════════════════════════════════════════════════
+function toolAddLink() {
+  openModal({
+    icon: '🔗', iconBg: 'var(--c-addlink)', title: 'Añadir enlace', accentColor: 'var(--c-addlink)',
+    subtitle: 'Añade un enlace clicable (URL) como pie de página en las páginas que elijas.',
+    body: `
+      <div id="alDrop" class="drop-zone" style="--accent-color:var(--c-addlink)">
+        <span class="drop-icon">🔗</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-addlink)">Seleccionar PDF</button>
+      </div>
+      <div id="alOptions" style="display:none;flex-direction:column;gap:14px">
+        <div class="info-card tip"><span class="info-icon">📄</span><span id="alInfo"></span></div>
+        <div class="form-group">
+          <label class="form-label">URL de destino</label>
+          <input class="form-input" id="alUrl" type="url" placeholder="https://ejemplo.com">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Texto a mostrar (opcional)</label>
+          <input class="form-input" id="alText" placeholder="Visita nuestra web">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Páginas</label>
+          <div class="toggle-group" style="--accent-color:var(--c-addlink)">
+            <button class="toggle-btn active" id="alAll" onclick="setAlPages('all')">Todas</button>
+            <button class="toggle-btn" id="alRange" onclick="setAlPages('range')">Rango</button>
+          </div>
+        </div>
+        <div id="alRangeBox" class="form-group" style="display:none">
+          <input class="form-input" id="alRangeVal" placeholder="Ej: 1, 3-5">
+        </div>
+      </div>
+      <div id="alResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="alBtn" disabled onclick="runAddLink()" style="background:var(--c-addlink)">🔗 Añadir enlace</button>
+    `
+  });
+
+  window._alPages = 'all';
+  makeDropZone('alDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._alFile = file;
+    const buf = await readFile(file);
+    window._alBuf = buf;
+    const src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    window._alPageCount = src.getPageCount();
+    document.getElementById('alDrop').style.display = 'none';
+    document.getElementById('alOptions').style.display = 'flex';
+    document.getElementById('alInfo').textContent = `"${file.name}" · ${src.getPageCount()} páginas`;
+    document.getElementById('alBtn').disabled = false;
+  });
+}
+
+function setAlPages(mode) {
+  window._alPages = mode;
+  document.getElementById('alAll').classList.toggle('active', mode === 'all');
+  document.getElementById('alRange').classList.toggle('active', mode === 'range');
+  document.getElementById('alRangeBox').style.display = mode === 'range' ? 'flex' : 'none';
+}
+
+async function runAddLink() {
+  const buf = window._alBuf;
+  const file = window._alFile;
+  const url = (document.getElementById('alUrl').value || '').trim();
+  const label = (document.getElementById('alText').value || '').trim() || url;
+  const mode = window._alPages || 'all';
+  const pageCount = window._alPageCount;
+  if (!url || !/^https?:\/\//i.test(url)) { toast('Introduce una URL válida (http/https)', 'error'); return; }
+  const btn = document.getElementById('alBtn');
+  btn.disabled = true; btn.textContent = '⏳ Añadiendo...';
+  try {
+    const pdf = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    const font = await pdf.embedFont(PDFLib.StandardFonts.Helvetica);
+    const size = 11;
+    let indices;
+    if (mode === 'all') indices = pdf.getPageIndices();
+    else { indices = parsePageRange(document.getElementById('alRangeVal').value, pageCount); }
+    if (!indices.length) { toast('Rango inválido', 'error'); btn.disabled = false; btn.textContent = '🔗 Añadir enlace'; return; }
+
+    for (const idx of indices) {
+      const page = pdf.getPage(idx);
+      const { width } = page.getSize();
+      const textW = font.widthOfTextAtSize(label, size);
+      const x = (width - textW) / 2;
+      const y = 24;
+      page.drawText(label, { x, y, size, font, color: PDFLib.rgb(0.05, 0.4, 0.85) });
+
+      const linkDict = pdf.context.obj({
+        Type: 'Annot',
+        Subtype: 'Link',
+        Rect: [x - 2, y - 3, x + textW + 2, y + size + 1],
+        Border: [0, 0, 0],
+        A: pdf.context.obj({ Type: 'Action', S: 'URI', URI: PDFLib.PDFString.of(url) }),
+      });
+      const ref = pdf.context.register(linkDict);
+      let annots = page.node.lookup(PDFLib.PDFName.of('Annots'), PDFLib.PDFArray);
+      if (!annots) {
+        annots = pdf.context.obj([]);
+        page.node.set(PDFLib.PDFName.of('Annots'), annots);
+      }
+      annots.push(ref);
+    }
+    const bytes = await pdf.save();
+    downloadBytes(bytes, file.name.replace('.pdf', '') + '_enlace.pdf');
+    toast('✅ Enlace añadido', 'success');
+    document.getElementById('alResult').innerHTML = `<div class="result-box"><span class="result-icon">🔗</span><div class="result-title">¡Enlace añadido!</div><div class="result-meta">${indices.length} páginas</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '🔗 Añadir enlace';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOOL: METADATOS
+// ═══════════════════════════════════════════════════════
+function toolMetadata() {
+  openModal({
+    icon: '🏷️', iconBg: 'var(--c-metadata)', title: 'Editar metadatos', accentColor: 'var(--c-metadata)',
+    subtitle: 'Consulta y modifica el título, autor, asunto y palabras clave del PDF.',
+    body: `
+      <div id="mdDrop" class="drop-zone" style="--accent-color:var(--c-metadata)">
+        <span class="drop-icon">🏷️</span>
+        <div class="drop-title">Arrastra tu PDF aquí</div>
+        <button class="drop-btn" style="background:var(--c-metadata)">Seleccionar PDF</button>
+      </div>
+      <div id="mdOptions" style="display:none;flex-direction:column;gap:12px">
+        <div class="form-group"><label class="form-label">Título</label><input class="form-input" id="mdTitle"></div>
+        <div class="form-group"><label class="form-label">Autor</label><input class="form-input" id="mdAuthor"></div>
+        <div class="form-group"><label class="form-label">Asunto</label><input class="form-input" id="mdSubject"></div>
+        <div class="form-group"><label class="form-label">Palabras clave (separadas por comas)</label><input class="form-input" id="mdKeywords"></div>
+        <div class="form-group"><label class="form-label">Creador / Aplicación</label><input class="form-input" id="mdCreator"></div>
+      </div>
+      <div id="mdResult"></div>
+    `,
+    footerHTML: `
+      <button class="btn btn-ghost" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" id="mdBtn" disabled onclick="runMetadata()" style="background:var(--c-metadata)">🏷️ Guardar metadatos</button>
+    `
+  });
+
+  makeDropZone('mdDrop', '.pdf,application/pdf', false, async ([file]) => {
+    window._mdFile = file;
+    const buf = await readFile(file);
+    window._mdBuf = buf;
+    const pdf = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    document.getElementById('mdDrop').style.display = 'none';
+    document.getElementById('mdOptions').style.display = 'flex';
+    const safe = v => v || '';
+    document.getElementById('mdTitle').value = safe(pdf.getTitle());
+    document.getElementById('mdAuthor').value = safe(pdf.getAuthor());
+    document.getElementById('mdSubject').value = safe(pdf.getSubject());
+    try { document.getElementById('mdKeywords').value = safe((pdf.getKeywords() || '')); } catch (e) {}
+    document.getElementById('mdCreator').value = safe(pdf.getCreator());
+    document.getElementById('mdBtn').disabled = false;
+  });
+}
+
+async function runMetadata() {
+  const buf = window._mdBuf;
+  const file = window._mdFile;
+  const btn = document.getElementById('mdBtn');
+  btn.disabled = true; btn.textContent = '⏳ Guardando...';
+  try {
+    const pdf = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+    pdf.setTitle(document.getElementById('mdTitle').value || '');
+    pdf.setAuthor(document.getElementById('mdAuthor').value || '');
+    pdf.setSubject(document.getElementById('mdSubject').value || '');
+    const kw = document.getElementById('mdKeywords').value || '';
+    pdf.setKeywords(kw ? kw.split(',').map(s => s.trim()).filter(Boolean) : []);
+    pdf.setCreator(document.getElementById('mdCreator').value || '');
+    const bytes = await pdf.save();
+    downloadBytes(bytes, file.name.replace('.pdf', '') + '_metadatos.pdf');
+    toast('✅ Metadatos guardados', 'success');
+    document.getElementById('mdResult').innerHTML = `<div class="result-box"><span class="result-icon">🏷️</span><div class="result-title">¡Metadatos actualizados!</div></div>`;
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '🏷️ Guardar metadatos';
+  }
+}
 
 // ═══════════════════════════════════════════════════════
 //  KEYBOARD
